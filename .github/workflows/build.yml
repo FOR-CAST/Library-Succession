@@ -81,8 +81,20 @@ jobs:
       ## OutputPath is relative to the project directory (src/), so this lands
       ## in <repo>/out. The .csproj sets it to empty for both configurations,
       ## which would otherwise scatter output into src/ alongside the sources.
+      ## ContinuousIntegrationBuild normalises source paths embedded in the
+      ## assembly and PDB. Deterministic builds are already the SDK default, so
+      ## no timestamp is stored and the MVID is derived from content; without
+      ## path normalisation the checked-out directory still leaks in, so two
+      ## runners produce different bytes from identical source. With it, a hash
+      ## difference between two builds of the same commit is meaningful rather
+      ## than expected noise. Line endings and SDK version can still differ
+      ## across platforms, so this does not make Linux and Windows builds
+      ## byte-identical -- it makes each platform's build reproducible.
       - name: Build (Release)
-        run: dotnet build src/library-succession.csproj -c Release -p:OutputPath=../out/
+        run: >
+          dotnet build src/library-succession.csproj -c Release
+          -p:OutputPath=../out/
+          -p:ContinuousIntegrationBuild=true
 
       - name: Verify build output
         run: |

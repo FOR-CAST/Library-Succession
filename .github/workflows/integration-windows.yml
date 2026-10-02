@@ -161,9 +161,43 @@ jobs:
           LANDIS_EXTENSIONS_YAML: ${{ needs.gate.outputs.extensions_yaml }}
           LANDIS_TARGET_COHORT_GENERATION: '2'
           LANDIS_DOWNLOAD_DIR: ${{ runner.temp }}\landis-installers
-        run: Rscript "$env:LANDIS_INSTALL_DIR\install_landis_windows.R"
+          ## The helper resolves each extension's installer through the GitHub
+          ## releases API. Unauthenticated, that is rate-limited per hour, and
+          ## the helper treats a failed lookup as "no V8 installer found" with a
+          ## warning rather than an error. Two runs eight minutes apart with
+          ## identical inputs therefore installed 20 and then only 8 of 20
+          ## extensions. Authenticating removes the cliff; the check below
+          ## refuses to proceed if it degrades anyway.
+          GITHUB_PAT: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $log = Join-Path $env:RUNNER_TEMP 'landis-install.log'
+          Rscript "$env:LANDIS_INSTALL_DIR\install_landis_windows.R" 2>&1 |
+            Tee-Object -FilePath $log
+          "LANDIS_INSTALL_LOG=$log" | Out-File -FilePath $env:GITHUB_ENV -Append
 
-      - name: Verify the console was found
+      ## A silently partial install is worse than a failed one: the scenario
+      ## then runs without extensions it needed, or dies on a confusing parse
+      ## error far from the cause. Fail here instead.
+      - name: Verify the install is complete
+        run: |
+          $log = Get-Content -LiteralPath $env:LANDIS_INSTALL_LOG -Raw
+          $m = [regex]::Match($log, 'Done:\s*(\d+)\s*installed,\s*(\d+)\s*failed,\s*(\d+)\s*no-installer')
+          if (-not $m.Success) {
+            Write-Host "::error::could not find the install summary in the helper output"
+            exit 1
+          }
+          $installed = [int]$m.Groups[1].Value
+          $failed    = [int]$m.Groups[2].Value
+          $missing   = [int]$m.Groups[3].Value
+          Write-Host "installed=$installed failed=$failed no-installer=$missing"
+
+          $bad = $false
+          if ($failed -gt 0)  { Write-Host "::error::$failed extension installer(s) failed"; $bad = $true }
+          if ($missing -gt 0) {
+            Write-Host "::error::$missing extension(s) had no installer resolved. With GITHUB_PAT set this indicates a genuine packaging gap, not API rate limiting -- check the helper's lookup for those repos."
+            $bad = $true
+          }
+          if ($bad) { exit 1 }
         run: |
           if (-not $env:LANDIS_CONSOLE_DLL) {
             Write-Host "::error::LANDIS_CONSOLE_DLL not set; the install step did not find a console."
