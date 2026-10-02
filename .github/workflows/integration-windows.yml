@@ -24,13 +24,20 @@
 ## observed difference was never attributable to the DLL. Writing the run
 ## matrix before knowing that risks building a harness that cannot work.
 ##
-## Manual dispatch only: the install is a Core MSI plus ~20 Inno Setup
-## extension installers and takes 5-15 minutes, which is too slow to attach to
-## every push.
+## Opt-in: the install is a Core MSI plus ~20 Inno Setup extension installers
+## and takes 5-15 minutes, too slow to attach to every push. It runs on manual
+## dispatch, or when a commit subject contains `[ci-windows]`. The sentinel is
+## matched against the FIRST LINE only, so describing the trigger in a commit
+## body cannot accidentally fire the job. (`workflow_dispatch` alone would not
+## do: GitHub only exposes it once the workflow is on the default branch, which
+## makes it useless while the workflow is still being developed on a branch.)
 
 name: integration-windows
 
 on:
+  push:
+    branches: ["**"]
+  pull_request:
   workflow_dispatch:
     inputs:
       extensions_yaml:
@@ -56,7 +63,46 @@ env:
   LANDISUTILS_REF: c85f1b6ac813bd4e4e7496bcfe5d24dd1290b11c
 
 jobs:
+  ## Cheap Linux job that decides whether the expensive Windows job runs, so an
+  ## ordinary push costs seconds rather than a quarter of an hour.
+  gate:
+    runs-on: ubuntu-latest
+    outputs:
+      run: ${{ steps.decide.outputs.run }}
+      extensions_yaml: ${{ steps.decide.outputs.extensions_yaml }}
+    steps:
+      - id: decide
+        env:
+          EVENT: ${{ github.event_name }}
+          MSG_PUSH: ${{ github.event.head_commit.message }}
+          MSG_PR: ${{ github.event.pull_request.title }}
+          INPUT_YAML: ${{ github.event.inputs.extensions_yaml }}
+        run: |
+          should_run=false
+          ## First line only: a commit body that merely mentions the sentinel
+          ## must not trigger a 15-minute install.
+          subject_push=$(printf '%s\n' "$MSG_PUSH" | head -n1)
+          subject_pr=$(printf '%s\n' "$MSG_PR" | head -n1)
+          case "$EVENT" in
+            workflow_dispatch)
+              should_run=true ;;
+            push)
+              [[ "$subject_push" == *"[ci-windows]"* ]] && should_run=true ;;
+            pull_request)
+              [[ "$subject_pr" == *"[ci-windows]"* ]] && should_run=true ;;
+          esac
+
+          ## `inputs` exists only for workflow_dispatch, so a push needs a default.
+          yaml="${INPUT_YAML:-extensions-v8-UCL2-release.yaml}"
+
+          echo "run=$should_run" >> "$GITHUB_OUTPUT"
+          echo "extensions_yaml=$yaml" >> "$GITHUB_OUTPUT"
+          echo "Gate: event=$EVENT run=$should_run yaml=$yaml"
+          echo "  push subject: $subject_push"
+
   install-and-inventory:
+    needs: gate
+    if: needs.gate.outputs.run == 'true'
     name: LANDIS-II v8 native install + binary inventory
     runs-on: windows-latest
 
@@ -65,9 +111,9 @@ jobs:
         shell: pwsh
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-dotnet@v4
+      - uses: actions/setup-dotnet@v6
         with:
           dotnet-version: '8.0.x'
 
@@ -102,17 +148,17 @@ jobs:
           "LANDIS_INSTALL_DIR=$dir" | Out-File -FilePath $env:GITHUB_ENV -Append
 
       - name: Cache LANDIS-II installers
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ${{ runner.temp }}\landis-installers
-          key: landis-installers-${{ env.LANDISUTILS_REF }}-${{ github.event.inputs.extensions_yaml }}
+          key: landis-installers-${{ env.LANDISUTILS_REF }}-${{ needs.gate.outputs.extensions_yaml }}
 
       ## Exports LANDIS_CONSOLE_DLL and LANDIS_EXCLUDE_EXTENSIONS to GITHUB_ENV.
       ## Individual extension install failures warn rather than fail, so a
       ## partial install still yields an inventory, which is the point.
       - name: Install LANDIS-II v8 (Core MSI + extension installers)
         env:
-          LANDIS_EXTENSIONS_YAML: ${{ github.event.inputs.extensions_yaml }}
+          LANDIS_EXTENSIONS_YAML: ${{ needs.gate.outputs.extensions_yaml }}
           LANDIS_TARGET_COHORT_GENERATION: '2'
           LANDIS_DOWNLOAD_DIR: ${{ runner.temp }}\landis-installers
         run: Rscript "$env:LANDIS_INSTALL_DIR\install_landis_windows.R"
@@ -175,7 +221,7 @@ jobs:
             }
           }
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: windows-install-inventory
@@ -185,7 +231,7 @@ jobs:
 
       ## msiexec and Inno Setup write verbose logs beside the downloads. Without
       ## these an install failure leaves nothing to explain it.
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: windows-installer-logs
