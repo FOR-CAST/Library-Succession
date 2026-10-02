@@ -405,18 +405,31 @@ jobs:
       ## Extracted somewhere that is never run in: this scenario rewrites its
       ## own harvest inputs (Magic Harvest launches a script that renames them),
       ## so a tree that has been run in is no longer pristine.
+      ## The zip, not the tarball. The runner resolves `tar` to MSYS GNU tar,
+      ## which reads a Windows path as a remote host spec and dies with
+      ## "Cannot connect to D: resolve failed". Expand-Archive has no such
+      ## problem and needs no external tool.
       - name: Fetch the PnET scenario
         run: |
-          $tgz = Join-Path $env:RUNNER_TEMP 'tda.tar.gz'
+          $zip = Join-Path $env:RUNNER_TEMP 'tda.zip'
           $dst = Join-Path $env:RUNNER_TEMP 'tda'
-          Invoke-WebRequest -Uri "https://codeload.github.com/$env:TDA_REPO/tar.gz/$env:TDA_REF" -OutFile $tgz
-          New-Item -ItemType Directory -Force -Path $dst | Out-Null
-          tar -xzf $tgz -C $dst --strip-components=1
-          $scen = Join-Path $dst 'tests/TestPnET_AllExtension'
+          Invoke-WebRequest -Uri "https://codeload.github.com/$env:TDA_REPO/zip/$env:TDA_REF" -OutFile $zip
+          if (Test-Path -LiteralPath $dst) { Remove-Item -Recurse -Force -LiteralPath $dst }
+          Expand-Archive -LiteralPath $zip -DestinationPath $dst -Force
+
+          ## GitHub's zip wraps everything in <repo>-<ref>; find it rather than
+          ## assuming the name.
+          $top = @(Get-ChildItem -LiteralPath $dst -Directory)
+          if ($top.Count -ne 1) {
+            Write-Host "::error::expected one top-level directory in the archive, found $($top.Count)"
+            exit 1
+          }
+          $scen = Join-Path $top[0].FullName 'tests/TestPnET_AllExtension'
           if (-not (Test-Path -LiteralPath (Join-Path $scen 'scenario_UCLv2.txt'))) {
             Write-Host "::error::scenario_UCLv2.txt not found under $scen"
             exit 1
           }
+          '{0} input files staged' -f @(Get-ChildItem -LiteralPath $scen -Recurse -File).Count | Write-Host
           Write-Host "pristine scenario: $scen"
           "PRISTINE_SCENARIO=$scen" | Out-File -FilePath $env:GITHUB_ENV -Append
 
