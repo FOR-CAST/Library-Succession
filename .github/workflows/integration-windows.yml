@@ -1,0 +1,194 @@
+## Install LANDIS-II v8 natively on Windows and record what got installed.
+##
+## WHY THIS EXISTS
+##
+## The reproduction race fixed in #26 only occurs when a succession extension
+## runs reproduction on more than one thread, and PnET-Succession is the only
+## extension that sets `ThreadCount` (it reads a `Parallel` parameter and
+## assigns it; NECN and Biomass Succession never touch it, so they always
+## reproduce serially). That makes the fix untestable in the Linux docker
+## images: the UCLv2 image carries Succession-v10 but ships no PnET, while the
+## image that ships PnET carries Succession-v9. There is no container in which
+## this library and PnET coexist.
+##
+## A native Windows install is the only configuration where they do, and it is
+## also what users actually run, so it is where a report of "different results
+## with the new DLL" has to be reproduced.
+##
+## WHAT THIS JOB DOES, AND DOES NOT, DO YET
+##
+## It installs and inventories; it does not yet run the model. Whether a
+## parallel comparison is even possible depends on something only the install
+## can answer: whether the PUBLISHED PnET installer binds Succession-v10 or
+## Succession-v9. If it binds v9, swapping a v10 DLL changes nothing and any
+## observed difference was never attributable to the DLL. Writing the run
+## matrix before knowing that risks building a harness that cannot work.
+##
+## Manual dispatch only: the install is a Core MSI plus ~20 Inno Setup
+## extension installers and takes 5-15 minutes, which is too slow to attach to
+## every push.
+
+name: integration-windows
+
+on:
+  workflow_dispatch:
+    inputs:
+      extensions_yaml:
+        description: 'Tool-Docker-Apptainer extension list to install'
+        type: choice
+        default: extensions-v8-UCL2-release.yaml
+        options:
+          - extensions-v8-UCL2-release.yaml
+          - extensions-v8-release.yaml
+
+permissions: read-all
+
+env:
+  ## The install helper is reused from landisutils rather than vendored: it is
+  ## ~880 lines that silently-install an MSI and a score of Inno Setup
+  ## packages, discover where they landed, and then MEASURE which cohort
+  ## library generation each installed extension binds. That measurement is the
+  ## whole value here, and duplicating it would mean duplicating its bug
+  ## history. Pinned to a commit so this workflow does not change underneath
+  ## itself. For an upstream PR it should be vendored or published properly;
+  ## a cross-repo raw fetch is acceptable for a diagnostic, not as a dependency.
+  LANDISUTILS_REPO: FOR-CAST/landisutils
+  LANDISUTILS_REF: c85f1b6ac813bd4e4e7496bcfe5d24dd1290b11c
+
+jobs:
+  install-and-inventory:
+    name: LANDIS-II v8 native install + binary inventory
+    runs-on: windows-latest
+
+    defaults:
+      run:
+        shell: pwsh
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - uses: r-lib/actions/setup-r@v2
+        with:
+          r-version: 'release'
+
+      ## The helper needs only gh and cli; it is not part of the landisutils
+      ## package proper. P3M serves Windows binaries, so this is seconds.
+      - name: Install R dependencies
+        run: |
+          install.packages(c('gh', 'cli'), repos = 'https://packagemanager.posit.co/cran/latest')
+        shell: Rscript {0}
+
+      ## _pins.R must sit beside the installer: the script sources it from its
+      ## own directory to resolve the Core MSI URL and the Tool-Docker-Apptainer
+      ## ref that supplies the extension list.
+      - name: Fetch the install helper
+        run: |
+          $dir = Join-Path $env:RUNNER_TEMP 'landis-install'
+          New-Item -ItemType Directory -Force -Path $dir | Out-Null
+          $base = "https://raw.githubusercontent.com/$env:LANDISUTILS_REPO/$env:LANDISUTILS_REF/inst/integration-tests"
+          foreach ($f in 'install_landis_windows.R', '_pins.R') {
+            $dest = Join-Path $dir $f
+            Invoke-WebRequest -Uri "$base/$f" -OutFile $dest
+            if (-not ((Test-Path -LiteralPath $dest) -and (Get-Item -LiteralPath $dest).Length -gt 0)) {
+              Write-Host "::error::failed to fetch $f"
+              exit 1
+            }
+            '{0,10} bytes  {1}' -f (Get-Item -LiteralPath $dest).Length, $f | Write-Host
+          }
+          "LANDIS_INSTALL_DIR=$dir" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Cache LANDIS-II installers
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}\landis-installers
+          key: landis-installers-${{ env.LANDISUTILS_REF }}-${{ github.event.inputs.extensions_yaml }}
+
+      ## Exports LANDIS_CONSOLE_DLL and LANDIS_EXCLUDE_EXTENSIONS to GITHUB_ENV.
+      ## Individual extension install failures warn rather than fail, so a
+      ## partial install still yields an inventory, which is the point.
+      - name: Install LANDIS-II v8 (Core MSI + extension installers)
+        env:
+          LANDIS_EXTENSIONS_YAML: ${{ github.event.inputs.extensions_yaml }}
+          LANDIS_TARGET_COHORT_GENERATION: '2'
+          LANDIS_DOWNLOAD_DIR: ${{ runner.temp }}\landis-installers
+        run: Rscript "$env:LANDIS_INSTALL_DIR\install_landis_windows.R"
+
+      - name: Verify the console was found
+        run: |
+          if (-not $env:LANDIS_CONSOLE_DLL) {
+            Write-Host "::error::LANDIS_CONSOLE_DLL not set; the install step did not find a console."
+            exit 1
+          }
+          if (-not (Test-Path -LiteralPath $env:LANDIS_CONSOLE_DLL)) {
+            Write-Host "::error::LANDIS_CONSOLE_DLL points at a missing file: $env:LANDIS_CONSOLE_DLL"
+            exit 1
+          }
+          Write-Host "LANDIS_CONSOLE_DLL = $env:LANDIS_CONSOLE_DLL"
+          Write-Host "LANDIS_EXCLUDE_EXTENSIONS = $env:LANDIS_EXCLUDE_EXTENSIONS"
+
+      ## Inventory both the console directory and the extensions directory
+      ## beside it. This is the artifact that makes a future bug report
+      ## answerable: AssemblyVersion is pinned at 10.0 for this library, so only
+      ## ProductVersion (InformationalVersion + source commit) and the hash can
+      ## identify which build was loaded.
+      - name: Inventory the installed binaries
+        run: |
+          $consoleDir = Split-Path -Parent $env:LANDIS_CONSOLE_DLL
+          $dirs = @($consoleDir)
+          foreach ($sub in 'extensions', 'Extensions') {
+            $p = Join-Path $consoleDir $sub
+            if (Test-Path -LiteralPath $p) { $dirs += $p }
+          }
+          Write-Host "inventorying: $($dirs -join ', ')"
+          ./tools/dll-inventory.ps1 $dirs -OutFile 'inventory/windows-install.csv'
+
+      ## The gating question for a parallel test. PnET is the only succession
+      ## extension that sets ThreadCount, so if its installed binary binds
+      ## Succession-v9 then replacing Succession-v10 cannot affect any PnET run
+      ## and the whole comparison is void.
+      - name: Report which Succession library PnET binds
+        run: |
+          $consoleDir = Split-Path -Parent $env:LANDIS_CONSOLE_DLL
+          $pnet = Get-ChildItem -LiteralPath $consoleDir -Recurse -Filter '*.dll' -File |
+                  Where-Object { $_.Name -match 'Succession\.BiomassPnET|PnET-Succession' }
+          if (-not $pnet) {
+            Write-Host "::warning::no PnET-Succession assembly found; a parallel reproduction test is not possible from this install"
+            exit 0
+          }
+          foreach ($p in $pnet) {
+            Write-Host "== $($p.Name)"
+            try {
+              $refs = [System.Reflection.Assembly]::LoadFrom($p.FullName).GetReferencedAssemblies() |
+                      Where-Object { $_.Name -match 'Succession|UniversalCohorts|PnETCohorts' }
+              foreach ($r in $refs) { Write-Host ("   ref -> {0}, Version={1}" -f $r.Name, $r.Version) }
+              if ($refs.Name -contains 'Landis.Library.Succession-v10') {
+                Write-Host "::notice::PnET binds Succession-v10; a parallel reproduction test IS possible from this install"
+              } else {
+                Write-Host "::warning::PnET does not bind Succession-v10; swapping that DLL cannot affect a PnET run"
+              }
+            } catch {
+              Write-Host "::warning::could not read references from $($p.Name): $($_.Exception.GetType().Name)"
+            }
+          }
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: windows-install-inventory
+          path: inventory/windows-install.csv
+          if-no-files-found: warn
+          retention-days: 14
+
+      ## msiexec and Inno Setup write verbose logs beside the downloads. Without
+      ## these an install failure leaves nothing to explain it.
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: windows-installer-logs
+          path: ${{ runner.temp }}/landis-installers/*.log
+          if-no-files-found: ignore
+          retention-days: 14
