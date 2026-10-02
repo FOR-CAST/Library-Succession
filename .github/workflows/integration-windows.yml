@@ -47,6 +47,14 @@ on:
         options:
           - extensions-v8-UCL2-release.yaml
           - extensions-v8-release.yaml
+      reps:
+        description: 'Runs per matrix cell (2 detects gross non-determinism; more is needed to call a cell reproducible)'
+        type: string
+        default: '2'
+      threads:
+        description: 'Thread count for the parallel cells'
+        type: string
+        default: '4'
 
 permissions: read-all
 
@@ -62,6 +70,17 @@ env:
   LANDISUTILS_REPO: FOR-CAST/landisutils
   LANDISUTILS_REF: c85f1b6ac813bd4e4e7496bcfe5d24dd1290b11c
 
+  ## The PnET scenario and the extension list are read from the SAME
+  ## Tool-Docker-Apptainer commit, so the inputs and the installed extension
+  ## set cannot drift apart. This is the ref landisutils pins, where the UCLv2
+  ## list includes PnET-Succession.
+  TDA_REPO: LANDIS-II-Foundation/Tool-Docker-Apptainer
+  TDA_REF: 043b43e6291813d5092721d45ff630502e777e30
+
+  ## The candidate half of the matrix is built from this ref, fetched from
+  ## upstream, so its provenance is the pull request itself.
+  PR_REF: pull/26/head
+
 jobs:
   ## Cheap Linux job that decides whether the expensive Windows job runs, so an
   ## ordinary push costs seconds rather than a quarter of an hour.
@@ -70,6 +89,8 @@ jobs:
     outputs:
       run: ${{ steps.decide.outputs.run }}
       extensions_yaml: ${{ steps.decide.outputs.extensions_yaml }}
+      reps: ${{ steps.decide.outputs.reps }}
+      threads: ${{ steps.decide.outputs.threads }}
     steps:
       - id: decide
         env:
@@ -77,6 +98,8 @@ jobs:
           MSG_PUSH: ${{ github.event.head_commit.message }}
           MSG_PR: ${{ github.event.pull_request.title }}
           INPUT_YAML: ${{ github.event.inputs.extensions_yaml }}
+          INPUT_REPS: ${{ github.event.inputs.reps }}
+          INPUT_THREADS: ${{ github.event.inputs.threads }}
         run: |
           should_run=false
           ## First line only: a commit body that merely mentions the sentinel
@@ -92,12 +115,21 @@ jobs:
               [[ "$subject_pr" == *"[ci-windows]"* ]] && should_run=true ;;
           esac
 
-          ## `inputs` exists only for workflow_dispatch, so a push needs a default.
+          ## `inputs` exists only for workflow_dispatch, so a push needs defaults.
           yaml="${INPUT_YAML:-extensions-v8-UCL2-release.yaml}"
+          reps="${INPUT_REPS:-2}"
+          threads="${INPUT_THREADS:-4}"
+
+          ## Guard against a non-numeric dispatch input reaching PowerShell as
+          ## a bare argument, where it would be a confusing parse error.
+          [[ "$reps"    =~ ^[0-9]+$ ]] || { echo "::error::reps must be an integer, got '$reps'"; exit 1; }
+          [[ "$threads" =~ ^[0-9]+$ ]] || { echo "::error::threads must be an integer, got '$threads'"; exit 1; }
 
           echo "run=$should_run" >> "$GITHUB_OUTPUT"
           echo "extensions_yaml=$yaml" >> "$GITHUB_OUTPUT"
-          echo "Gate: event=$EVENT run=$should_run yaml=$yaml"
+          echo "reps=$reps" >> "$GITHUB_OUTPUT"
+          echo "threads=$threads" >> "$GITHUB_OUTPUT"
+          echo "Gate: event=$EVENT run=$should_run yaml=$yaml reps=$reps threads=$threads"
           echo "  push subject: $subject_push"
 
   install-and-inventory:
@@ -275,6 +307,107 @@ jobs:
         with:
           name: windows-install-inventory
           path: inventory/windows-install.csv
+          if-no-files-found: warn
+          retention-days: 14
+
+      ## ----------------------------------------------------------------------
+      ## Reproduction run matrix.
+      ##
+      ## Both libraries are built here, in one job, from one checkout. That is
+      ## the point: an earlier attempt compared a locally built candidate
+      ## against the library shipping in Support-Library-Dlls-v8, which is a
+      ## Debug build linked against a different UniversalCohorts version, so the
+      ## comparison varied three things at once and established nothing. Here
+      ## the only difference between the two halves is the four files PR #26
+      ## touches.
+      ## ----------------------------------------------------------------------
+
+      - name: Build the baseline library (this checkout)
+        run: |
+          dotnet build src/library-succession.csproj -c Release `
+            -p:OutputPath=${{ runner.temp }}/lib-baseline/ `
+            -p:ContinuousIntegrationBuild=true
+          Get-Item "${{ runner.temp }}/lib-baseline/Landis.Library.Succession-v10.dll" |
+            ForEach-Object { 'baseline : {0,7} bytes  FileVersion {1}' -f $_.Length, $_.VersionInfo.FileVersion } |
+            Write-Host
+
+      ## Swap in only the files the PR changes, build, then put the tree back.
+      - name: Build the candidate library (upstream PR sources)
+        run: |
+          git remote add upstream "https://github.com/$env:TDA_PR_SOURCE_REPO.git" 2>$null
+          git fetch --quiet upstream "$env:PR_REF"
+          $sha = (git rev-parse FETCH_HEAD).Trim()
+          Write-Host "candidate sources: $env:PR_REF -> $sha"
+          "PR26_SHA=$sha" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+          $files = @('src/Reproduction.cs', 'src/Seeding.cs',
+                     'src/WardSeedDispersal.cs', 'src/library-succession.csproj')
+          git checkout FETCH_HEAD -- $files
+          Write-Host "files taken from the PR:"
+          git diff --stat HEAD -- $files
+
+          dotnet build src/library-succession.csproj -c Release `
+            -p:OutputPath=${{ runner.temp }}/lib-fixed/ `
+            -p:ContinuousIntegrationBuild=true
+          Get-Item "${{ runner.temp }}/lib-fixed/Landis.Library.Succession-v10.dll" |
+            ForEach-Object { 'candidate: {0,7} bytes  FileVersion {1}' -f $_.Length, $_.VersionInfo.FileVersion } |
+            Write-Host
+
+          ## Restore, so later steps see the branch as checked out.
+          git checkout HEAD -- $files
+        env:
+          TDA_PR_SOURCE_REPO: LANDIS-II-Foundation/Library-Succession
+
+      ## Scenario and extension list come from the SAME Tool-Docker-Apptainer
+      ## commit, so inputs and installed extensions cannot drift apart.
+      ## Extracted somewhere that is never run in: this scenario rewrites its
+      ## own harvest inputs (Magic Harvest launches a script that renames them),
+      ## so a tree that has been run in is no longer pristine.
+      - name: Fetch the PnET scenario
+        run: |
+          $tgz = Join-Path $env:RUNNER_TEMP 'tda.tar.gz'
+          $dst = Join-Path $env:RUNNER_TEMP 'tda'
+          Invoke-WebRequest -Uri "https://codeload.github.com/$env:TDA_REPO/tar.gz/$env:TDA_REF" -OutFile $tgz
+          New-Item -ItemType Directory -Force -Path $dst | Out-Null
+          tar -xzf $tgz -C $dst --strip-components=1
+          $scen = Join-Path $dst 'tests/TestPnET_AllExtension'
+          if (-not (Test-Path -LiteralPath (Join-Path $scen 'scenario_UCLv2.txt'))) {
+            Write-Host "::error::scenario_UCLv2.txt not found under $scen"
+            exit 1
+          }
+          Write-Host "pristine scenario: $scen"
+          "PRISTINE_SCENARIO=$scen" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      ## Magic Harvest shells out to `python`. If it is missing the run dies
+      ## mid-scenario, which reads like a model failure rather than a missing
+      ## dependency.
+      - name: Check python is on PATH (Magic Harvest launches it)
+        run: |
+          $v = (& python --version 2>&1) -join ' '
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "::error::python is not on PATH; Magic Harvest cannot launch switchManagementNames.py"
+            exit 1
+          }
+          Write-Host "python: $v"
+
+      - name: Run the reproduction matrix
+        run: |
+          ./tools/run-pnet-matrix.ps1 `
+            -ConsoleDll "$env:LANDIS_CONSOLE_DLL" `
+            -PristineScenario "$env:PRISTINE_SCENARIO" `
+            -BaselineDll "${{ runner.temp }}/lib-baseline/Landis.Library.Succession-v10.dll" `
+            -FixedDll "${{ runner.temp }}/lib-fixed/Landis.Library.Succession-v10.dll" `
+            -WorkRoot "${{ runner.temp }}/matrix" `
+            -Reps ${{ needs.gate.outputs.reps }} `
+            -Threads ${{ needs.gate.outputs.threads }}
+
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: windows-matrix-results
+          path: |
+            ${{ runner.temp }}/matrix/matrix-results.json
+            ${{ runner.temp }}/matrix/*.log
           if-no-files-found: warn
           retention-days: 14
 
