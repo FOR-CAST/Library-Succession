@@ -322,6 +322,48 @@ jobs:
       ## touches.
       ## ----------------------------------------------------------------------
 
+      ## `src/lib/*.dll` is git-ignored, so a fresh checkout cannot compile until
+      ## these are fetched. Forgetting this step is exactly how the first attempt
+      ## at the matrix failed, with a CS0234 about a missing namespace rather
+      ## than anything mentioning the support libraries.
+      ##
+      ## Two sources, deliberately. `UniversalCohorts-v2` is taken from the
+      ## INSTALL on this runner, because the version a library is compiled
+      ## against has to match the one it will be loaded against: a build linked
+      ## to 2.0.1.0 hard-fails on an install carrying 1.3.0.0, and the repo's own
+      ## download script pulls from a moving branch, so it cannot be relied on
+      ## to agree with whatever the installers just put on disk. `Seed_Dispersal`
+      ## is not shipped by the installers at all, so it comes from the script;
+      ## that is survivable because .NET resolves assemblies lazily and the Ward
+      ## dispersal path this scenario uses never touches those types.
+      - name: Stage the support libraries the build needs
+        run: |
+          Push-Location src/lib
+          try { ./support_libs_download.ps1 } finally { Pop-Location }
+
+          $consoleDir  = Split-Path -Parent $env:LANDIS_CONSOLE_DLL
+          $installRoot = Split-Path -Parent $consoleDir
+          $installed = Get-ChildItem -LiteralPath $installRoot -Recurse -File `
+                                     -Filter 'Landis.Library.UniversalCohorts-v2.dll' |
+                       Select-Object -First 1
+          if (-not $installed) {
+            Write-Host "::error::no UniversalCohorts-v2 in the install; cannot guarantee the build matches what it will run against"
+            exit 1
+          }
+          Copy-Item -Force -LiteralPath $installed.FullName -Destination 'src/lib/Landis.Library.UniversalCohorts-v2.dll'
+
+          foreach ($n in 'Landis.Library.UniversalCohorts-v2.dll', 'Seed_Dispersal.dll') {
+            $p = Join-Path 'src/lib' $n
+            if (-not ((Test-Path -LiteralPath $p) -and (Get-Item -LiteralPath $p).Length -gt 0)) {
+              Write-Host "::error::missing or empty: $p"
+              exit 1
+            }
+            $i = Get-Item -LiteralPath $p
+            $h = (Get-FileHash -LiteralPath $p -Algorithm SHA256).Hash.Substring(0,16).ToLower()
+            $src = ($n -like 'Landis.Library.UniversalCohorts-v2*') ? 'from the install' : 'from the download script'
+            '{0,-42} {1,7} bytes  {2}  {3}' -f $n, $i.Length, $h, $src | Write-Host
+          }
+
       - name: Build the baseline library (this checkout)
         run: |
           dotnet build src/library-succession.csproj -c Release `
