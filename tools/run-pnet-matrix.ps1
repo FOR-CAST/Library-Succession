@@ -199,6 +199,8 @@ function Compare-Fingerprints {
 ## --------------------------------------------------------------------------
 ## One run.
 ## --------------------------------------------------------------------------
+## $Dll = '' means run the install exactly as the installers left it, swapping
+## nothing. Used for the pre-flight below.
 function Invoke-Run {
     param([string] $Label, [string] $Dll, [string] $ParallelValue, [int] $ExpectThreads)
 
@@ -209,7 +211,11 @@ function Invoke-Run {
     Copy-Item -Recurse -LiteralPath $PristineScenario -Destination $runDir
 
     Set-ParallelValue -RunDir $runDir -Value $ParallelValue
-    Copy-Item -Force -LiteralPath $Dll -Destination $swapTarget
+    if ($Dll) {
+        Copy-Item -Force -LiteralPath $Dll -Destination $swapTarget
+    } else {
+        Write-Host "    (no swap: using the library the installers left in place)"
+    }
 
     $log = "$runDir.log"
     $sw  = [System.Diagnostics.Stopwatch]::StartNew()
@@ -259,6 +265,32 @@ function Invoke-Run {
 ## --------------------------------------------------------------------------
 ## Run the matrix.
 ## --------------------------------------------------------------------------
+## --------------------------------------------------------------------------
+## Pre-flight: can this install run the scenario AT ALL, before anything is
+## swapped?
+##
+## Without this gate the matrix happily runs eight times, every run dies at
+## extension load in under a second, and the comparisons then report "0
+## differing files" across eight identically-failed runs -- a reassuring
+## result that means nothing. That is precisely what happened on the first
+## attempt. The pre-flight separates "the environment is broken" from "the
+## library change did something", and attributes the former correctly: it uses
+## the library the installers left in place, so a failure here cannot be blamed
+## on the candidate.
+## --------------------------------------------------------------------------
+Write-Host ""
+Write-Host "=== pre-flight: install as shipped, nothing swapped ==="
+$preflight = Invoke-Run -Label 'preflight-asinstalled' -Dll '' -ParallelValue '1' -ExpectThreads 1
+if (-not $preflight.Ok) {
+    Write-Host ""
+    Write-Host ("::error::the install cannot run this scenario before any library is swapped, " +
+                "so the matrix would compare failed runs. This is an environment problem, not a " +
+                "result about the candidate library.")
+    Write-Host "  See the pre-flight log for the failure: $($preflight.Dir).log"
+    exit 1
+}
+Write-Host "pre-flight ok: the install runs the scenario, so the matrix can attribute differences"
+
 $cells = @(
     @{ Key = 'base-serial';    Dll = $BaselineDll; Parallel = '1';       Expect = 1 }
     @{ Key = 'fixed-serial';   Dll = $FixedDll;    Parallel = '1';       Expect = 1 }
