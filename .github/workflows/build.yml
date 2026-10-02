@@ -1,0 +1,111 @@
+## Build the Succession library on Linux and Windows.
+##
+## This repository had no CI. The gap is not theoretical: `src/lib/*.dll` is
+## git-ignored, so a fresh clone cannot compile until `support_libs_download.ps1`
+## has run, and nothing checked that the committed .csproj still builds. A build
+## break therefore surfaced only when somebody assembled a LANDIS-II
+## distribution, far from the change that caused it.
+##
+## Deliberately cheap: no LANDIS-II install, no model runs. It answers one
+## question -- does the library still compile from a clean checkout on both
+## platforms -- and publishes the resulting assembly plus an inventory of the
+## binaries that produced it. `integration-windows.yml` does the expensive part.
+
+name: build
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+permissions: read-all
+
+jobs:
+  build:
+    name: build (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+
+    ## fail-fast off: Windows and Linux fail for genuinely different reasons
+    ## here (path handling, the PowerShell download script, native GDAL), and a
+    ## break on one says nothing about the other.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+
+    defaults:
+      run:
+        shell: pwsh
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      ## Run the repo's own script rather than reimplementing the fetch, so CI
+      ## exercises the documented build path. If the script breaks, that is a
+      ## real break for anyone following the README.
+      ##
+      ## Note it pulls from the Support-Library-Dlls-v8 DEFAULT BRANCH, not a
+      ## pinned commit, so this step can change what it installs without any
+      ## change to this repository. That makes a green run non-reproducible and
+      ## a red one potentially nothing to do with the commit under test. Pinning
+      ## it is a separate change; the inventory step below at least records
+      ## which binaries a given run actually used.
+      - name: Download LANDIS-II support libraries
+        working-directory: src/lib
+        run: ./support_libs_download.ps1
+
+      ## support_libs_download.ps1 catches its own exceptions and prints a
+      ## message, so a failed download still exits 0 and the build fails later
+      ## with a confusing CS0246 about a missing namespace. Check explicitly.
+      - name: Verify support libraries are present
+        run: |
+          $missing = @()
+          foreach ($dll in 'Landis.Library.UniversalCohorts-v2.dll', 'Seed_Dispersal.dll') {
+            $p = Join-Path 'src/lib' $dll
+            if ((Test-Path -LiteralPath $p) -and (Get-Item -LiteralPath $p).Length -gt 0) {
+              '{0,10} bytes  {1}' -f (Get-Item -LiteralPath $p).Length, $p | Write-Host
+            } else {
+              $missing += $dll
+            }
+          }
+          if ($missing.Count -gt 0) {
+            Write-Host "::error::support library download produced nothing usable for: $($missing -join ', ')"
+            exit 1
+          }
+
+      ## OutputPath is relative to the project directory (src/), so this lands
+      ## in <repo>/out. The .csproj sets it to empty for both configurations,
+      ## which would otherwise scatter output into src/ alongside the sources.
+      - name: Build (Release)
+        run: dotnet build src/library-succession.csproj -c Release -p:OutputPath=../out/
+
+      - name: Verify build output
+        run: |
+          $dll = 'out/Landis.Library.Succession-v10.dll'
+          if (-not ((Test-Path -LiteralPath $dll) -and (Get-Item -LiteralPath $dll).Length -gt 0)) {
+            Write-Host "::error::expected assembly not produced: $dll"
+            exit 1
+          }
+          '{0,10} bytes  {1}' -f (Get-Item -LiteralPath $dll).Length, $dll | Write-Host
+
+      ## Records what this run was built from and against. AssemblyVersion is
+      ## pinned at 10.0 by the .csproj, so it cannot identify a build; the
+      ## ProductVersion column carries the source commit and is what makes two
+      ## otherwise identical-looking DLLs distinguishable.
+      - name: Inventory built and referenced assemblies
+        run: ./tools/dll-inventory.ps1 out, src/lib -OutFile "inventory/${{ matrix.os }}.csv"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: succession-library-${{ matrix.os }}
+          path: |
+            out/Landis.Library.Succession-v10.dll
+            out/Landis.Library.Succession-v10.pdb
+            inventory/${{ matrix.os }}.csv
+          if-no-files-found: error
+          retention-days: 14
