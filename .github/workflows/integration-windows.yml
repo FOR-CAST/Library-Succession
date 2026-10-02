@@ -198,6 +198,8 @@ jobs:
             $bad = $true
           }
           if ($bad) { exit 1 }
+
+      - name: Verify the console was found
         run: |
           if (-not $env:LANDIS_CONSOLE_DLL) {
             Write-Host "::error::LANDIS_CONSOLE_DLL not set; the install step did not find a console."
