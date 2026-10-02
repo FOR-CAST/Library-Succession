@@ -23,6 +23,7 @@ namespace Landis.Library.Succession
         {
             established = false;
             seedlingProportion = 1;
+
             if (species.EffectiveSeedDist == Universal)
             {
                 UniversalDispersal.Algorithm(species, site, out established, out seedlingProportion);
@@ -77,10 +78,13 @@ namespace Landis.Library.Succession
                     {
                         Site neighbor = site.GetNeighbor(reloc.Location);
                         if (neighbor != null && neighbor.IsActive)
-                            if (Reproduction.MaturePresent(species, (ActiveSite)neighbor))
+                            lock (Reproduction.GetSiteLock((ActiveSite)neighbor))
                             {
-                                established = true;
-                                break;
+                                if (Reproduction.MaturePresent(species, (ActiveSite)neighbor))
+                                {
+                                    established = true;
+                                    break;
+                                }
                             }
                     }
 
@@ -91,10 +95,13 @@ namespace Landis.Library.Succession
                         if (rCol == 0)
                             neighbor = site.GetNeighbor(new RelativeLocation(0, rRow));
                         if (neighbor != null && neighbor.IsActive)
-                            if (Reproduction.MaturePresent(species, (ActiveSite)neighbor))
+                            lock (Reproduction.GetSiteLock((ActiveSite)neighbor))
                             {
-                                established = true;
-                                break;
+                                if (Reproduction.MaturePresent(species, (ActiveSite)neighbor))
+                                {
+                                    established = true;
+                                    break;
+                                }
                             }
                     }
 
@@ -102,10 +109,13 @@ namespace Landis.Library.Succession
                     {
                         Site neighbor = site.GetNeighbor(new RelativeLocation(rRow * -1, rCol * -1));
                         if (neighbor != null && neighbor.IsActive)
-                            if (Reproduction.MaturePresent(species, (ActiveSite)neighbor))
+                            lock (Reproduction.GetSiteLock((ActiveSite)neighbor))
                             {
-                                established = true;
-                                break;
+                                if (Reproduction.MaturePresent(species, (ActiveSite)neighbor))
+                                {
+                                    established = true;
+                                    break;
+                                }
                             }
                     }
 
@@ -115,13 +125,15 @@ namespace Landis.Library.Succession
                         if (rCol == 0)
                             neighbor = site.GetNeighbor(new RelativeLocation(0, rRow * -1));
                         if (neighbor != null && neighbor.IsActive)
-                            if (Reproduction.MaturePresent(species, (ActiveSite)neighbor))
+                            lock (Reproduction.GetSiteLock((ActiveSite)neighbor))
                             {
-                                established = true;
-                                break;
+                                if (Reproduction.MaturePresent(species, (ActiveSite)neighbor))
+                                {
+                                    established = true;
+                                    break;
+                                }
                             }
                     }
-
                 }  // end foreach relativelocation
             }
          

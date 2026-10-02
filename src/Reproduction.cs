@@ -85,6 +85,24 @@ namespace Landis.Library.Succession
         private static ISiteVar<bool> noEstablish;
         private static IPlanting planting;
 
+        // We must synchronize access to each site's cohort list: while one
+        // worker thread adds/removes cohorts at a site, another thread may be
+        // reading (iterating) that same site's cohort list during seed
+        // dispersal, which would otherwise crash with a "collection was
+        // modified during enumeration" error.
+        //
+        // Instead of one lock object per active site (about 128 MB of lock
+        // objects on a 4-million-cell landscape, spent even when running with a
+        // single thread), we use a small fixed set of "striped" locks. Each
+        // site maps to a stripe via "data index % SiteLockCount" (see
+        // GetSiteLock below), so memory stays O(1).
+        //
+        // SiteLockCount only needs to be comfortably larger than the number of
+        // worker threads (ThreadCount). Collisions are then rare and harmless.
+        private const int SiteLockCount = 1024;
+
+        private static readonly object[] siteLocks = CreateSiteLocks();
+
         private static Delegates.AddNewCohort addNewCohort;
         private static Delegates.SufficientResources lightMethod = ReproductionDefaults.SufficientResources;
         private static Delegates.Establish estbMethod = ReproductionDefaults.Establish;
@@ -371,49 +389,80 @@ namespace Landis.Library.Succession
         //---------------------------------------------------------------------
 
         /// <summary>
+        /// Returns the lock object that guards a site's cohort collection.
+        ///
+        /// IMPORTANT — DO NOT NEST THESE LOCKS.
+        /// These locks are "striped": many different sites share the same lock
+        /// object. That is fine as long as each lock is taken on its own and
+        /// released before the next one is taken (which is how all the current
+        /// code behaves).
+        ///
+        /// Never put a GetSiteLock(...) lock INSIDE another GetSiteLock(...)
+        /// lock. If a future change ever modifies two sites' cohorts at once,
+        /// take the two locks one after the other, not one inside the other.
+        /// Nesting them can deadlock: the simulation then freezes silently with
+        /// no error message, which is very hard to diagnose.
+        /// </summary>
+        internal static object GetSiteLock(ActiveSite site)
+        {
+            return siteLocks[(int)(site.DataIndex % SiteLockCount)];
+        }
+
+        /// <summary>
+        /// Creates the fixed, striped set of lock objects.
+        /// </summary>
+        private static object[] CreateSiteLocks()
+        {
+            var locks = new object[SiteLockCount];
+            for (int i = 0; i < locks.Length; i++)
+                locks[i] = new object();
+            return locks;
+        }
+
+        /// <summary>
         /// Does the appropriate forms of reproduction at a site.
         /// </summary>
         public static void Reproduce(ActiveSite site, ThreadSafeRandom randomGen = null)
         {
-            if(noEstablish[site])
+            if (noEstablish[site])
                 return;
 
-            bool plantingOccurred = planting.TryAt(site);
-            //bool plantingOccurred = false;
-            //for (int index = 0; index < speciesDataset.Count; ++index)
-            //{
-            //    if (planting[site].Get(index))
-            //    {
-            //        ISpecies species = speciesDataset[index];
-            //        if (PlantingEstablish(species, site))
-            //        {
-            //            AddNewCohort(species, site);
-            //            plantingOccurred = true;
-            //        }
-            //    }
-            //}
+            object siteLock = GetSiteLock(site);
+
+            bool plantingOccurred;
+            lock (siteLock)
+            {
+                plantingOccurred = planting.TryAt(site);
+            }
 
             bool sufficientLight;
 
             bool serotinyOccurred = false;
-            if (! plantingOccurred) {
-                for (int index = 0; index < speciesDataset.Count; ++index) {
-                    if (serotiny[site].Get(index)) {
+            if (!plantingOccurred)
+            {
+                for (int index = 0; index < speciesDataset.Count; ++index)
+                {
+                    if (serotiny[site].Get(index))
+                    {
                         ISpecies species = speciesDataset[index];
                         sufficientLight = SufficientResources(species, site);
-                        if (sufficientLight && Establish(species, site)) {
-                            // Temp set propBiomass to 1.0
-                            AddNewCohort(species, site,"serotiny", 1.0);
+                        if (sufficientLight && Establish(species, site))
+                        {
+                            lock (siteLock)
+                            {
+                                AddNewCohort(species, site, "serotiny", 1.0);
+                            }
                             serotinyOccurred = true;
                             if (isDebugEnabled)
                                 log.DebugFormat("site {0}: {1} post-fire regenerated",
                                                 site.Location, species.Name);
                         }
-                        else {
+                        else
+                        {
                             if (isDebugEnabled)
                                 log.DebugFormat("site {0}: {1} post-fire regen failed: {2}",
                                                 site.Location, species.Name,
-                                                ! sufficientLight ? "insufficient light"
+                                                !sufficientLight ? "insufficient light"
                                                                   : "didn't establish");
                         }
                     }
@@ -422,25 +471,32 @@ namespace Landis.Library.Succession
             serotiny[site].SetAll(false);
 
             bool speciesResprouted = false;
-            if (! serotinyOccurred) {
-                for (int index = 0; index < speciesDataset.Count; ++index) {
-                    if (resprout[site].Get(index)) {
+            if (!serotinyOccurred)
+            {
+                for (int index = 0; index < speciesDataset.Count; ++index)
+                {
+                    if (resprout[site].Get(index))
+                    {
                         ISpecies species = speciesDataset[index];
                         sufficientLight = SufficientResources(species, site);
                         if (sufficientLight &&
-                                ((randomGen == null ? Model.Core.NextDouble() : randomGen.NextDouble()) < species.VegReprodProb)) {
-                            // Temp set propBiomass to 1.0
-                            AddNewCohort(species, site, "resprout",1.0);
+                                ((randomGen == null ? Model.Core.NextDouble() : randomGen.NextDouble()) < species.VegReprodProb))
+                        {
+                            lock (siteLock)
+                            {
+                                AddNewCohort(species, site, "resprout", 1.0);
+                            }
                             speciesResprouted = true;
                             if (isDebugEnabled)
                                 log.DebugFormat("site {0}: {1} resprouted",
                                                 site.Location, species.Name);
                         }
-                        else {
+                        else
+                        {
                             if (isDebugEnabled)
                                 log.DebugFormat("site {0}: {1} resprouting failed: {2}",
                                                 site.Location, species.Name,
-                                                ! sufficientLight ? "insufficient light"
+                                                !sufficientLight ? "insufficient light"
                                                                   : "random # >= probability");
                         }
                     }
@@ -449,10 +505,8 @@ namespace Landis.Library.Succession
             resprout[site].SetAll(false);
 
             planting.NotTriedAt(site);
-            if (! plantingOccurred && ! serotinyOccurred && ! speciesResprouted)
+            if (!plantingOccurred && !serotinyOccurred && !speciesResprouted)
                 seeding.Do(site, randomGen);
-
-            
         }
 
 

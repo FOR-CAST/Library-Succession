@@ -6,9 +6,11 @@
 	  <AssemblyProduct>Landis.Library.Succession-v10</AssemblyProduct>
 	  <AssemblyCompany>LANDIS-II Foundation</AssemblyCompany>
 	  <AssemblyCopyright>LANDIS-II Foundation</AssemblyCopyright>        
+    <!-- AssemblyVersion deliberately held at 10.0 for binary binding compatibility
+         with existing references; Version/FileVersion carry the human-readable stamp. -->
     <AssemblyVersion>10.0</AssemblyVersion>
-	  <Version>10.0</Version>
-	  <FileVersion>10.0</FileVersion>
+	  <Version>10.1.0</Version>
+	  <FileVersion>10.1.0</FileVersion>
 	  <AssemblyDescription>Input Parameters Library for LANDIS-II</AssemblyDescription>
     <TargetFramework>netstandard2.0</TargetFramework>
     <GeneratePackageOnBuild>false</GeneratePackageOnBuild>
@@ -26,18 +28,16 @@
     <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
 	  <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
   </PropertyGroup>
-  
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|AnyCPU'">
-
-
     <OutputPath></OutputPath>
     <!--<OutputPath>bin\Debug\</OutputPath>-->
-
   </PropertyGroup>
 
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|AnyCPU'">
     <OutputPath></OutputPath>
   </PropertyGroup>
+
+
 
   <ItemGroup>
     <!--<PackageReference Include="Accord" Version="3.8.0" />-->
