@@ -181,16 +181,23 @@ jobs:
       ## answerable: AssemblyVersion is pinned at 10.0 for this library, so only
       ## ProductVersion (InformationalVersion + source commit) and the hash can
       ## identify which build was loaded.
+      ## Recurse from the install ROOT, not the console directory. The extension
+      ## assemblies do not sit beside the console: a first attempt scanned only
+      ## the console directory plus an assumed `extensions` subdirectory, found
+      ## 27 core assemblies and no succession libraries at all, and reported
+      ## success. The install itself had been fine.
       - name: Inventory the installed binaries
         run: |
-          $consoleDir = Split-Path -Parent $env:LANDIS_CONSOLE_DLL
-          $dirs = @($consoleDir)
-          foreach ($sub in 'extensions', 'Extensions') {
-            $p = Join-Path $consoleDir $sub
-            if (Test-Path -LiteralPath $p) { $dirs += $p }
-          }
-          Write-Host "inventorying: $($dirs -join ', ')"
-          ./tools/dll-inventory.ps1 $dirs -OutFile 'inventory/windows-install.csv'
+          $consoleDir  = Split-Path -Parent $env:LANDIS_CONSOLE_DLL
+          $installRoot = Split-Path -Parent $consoleDir
+          Write-Host "console dir : $consoleDir"
+          Write-Host "install root: $installRoot"
+          Write-Host "directories containing assemblies:"
+          Get-ChildItem -LiteralPath $installRoot -Filter *.dll -File -Recurse |
+            Group-Object DirectoryName |
+            Sort-Object Name |
+            ForEach-Object { '  {0,5} dll  {1}' -f $_.Count, $_.Name | Write-Host }
+          ./tools/dll-inventory.ps1 $installRoot -Recurse -OutFile 'inventory/windows-install.csv'
 
       ## The gating question for a parallel test. PnET is the only succession
       ## extension that sets ThreadCount, so if its installed binary binds
@@ -198,12 +205,18 @@ jobs:
       ## and the whole comparison is void.
       - name: Report which Succession library PnET binds
         run: |
-          $consoleDir = Split-Path -Parent $env:LANDIS_CONSOLE_DLL
-          $pnet = Get-ChildItem -LiteralPath $consoleDir -Recurse -Filter '*.dll' -File |
+          $consoleDir  = Split-Path -Parent $env:LANDIS_CONSOLE_DLL
+          $installRoot = Split-Path -Parent $consoleDir
+          $pnet = Get-ChildItem -LiteralPath $installRoot -Recurse -Filter '*.dll' -File |
                   Where-Object { $_.Name -match 'Succession\.BiomassPnET|PnET-Succession' }
+          ## Fail rather than warn. The install step reports how many extensions
+          ## it installed and which generation each binds, so "PnET is missing"
+          ## here after a clean install means this step is looking in the wrong
+          ## place -- which is exactly what happened, and warning let the job go
+          ## green while establishing nothing.
           if (-not $pnet) {
-            Write-Host "::warning::no PnET-Succession assembly found; a parallel reproduction test is not possible from this install"
-            exit 0
+            Write-Host "::error::no PnET-Succession assembly found under $installRoot, yet the install step reported success; this check is looking in the wrong place"
+            exit 1
           }
           foreach ($p in $pnet) {
             Write-Host "== $($p.Name)"

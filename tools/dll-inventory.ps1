@@ -27,15 +27,24 @@
 .PARAMETER OutFile
     Optional CSV destination. Parent directories are created as needed.
 
+.PARAMETER Recurse
+    Descend into subdirectories. Needed for a LANDIS-II install, where the
+    extension assemblies do not sit beside the console.
+
 .EXAMPLE
     ./tools/dll-inventory.ps1 out, src/lib -OutFile inventory.csv
+
+.EXAMPLE
+    ./tools/dll-inventory.ps1 'C:\Program Files\LANDIS-II-v8' -Recurse
 #>
 [CmdletBinding()]
 param(
     [Parameter(Mandatory, Position = 0)]
     [string[]] $Path,
 
-    [string] $OutFile
+    [string] $OutFile,
+
+    [switch] $Recurse
 )
 
 $ErrorActionPreference = 'Stop'
@@ -46,7 +55,11 @@ $rows = foreach ($dir in $Path) {
         continue
     }
 
-    foreach ($f in (Get-ChildItem -LiteralPath $dir -Filter *.dll -File | Sort-Object Name)) {
+    $found = Get-ChildItem -LiteralPath $dir -Filter *.dll -File -Recurse:$Recurse |
+             Sort-Object FullName
+    if (-not $found) { Write-Warning "no .dll files under: $dir" }
+
+    foreach ($f in $found) {
         ## Native DLLs (GDAL and friends) have no managed assembly identity.
         ## They still belong in the inventory, so record them rather than
         ## dropping them: a mismatched native dependency is just as capable of
@@ -68,7 +81,7 @@ $rows = foreach ($dir in $Path) {
         }
 
         [pscustomobject] @{
-            Directory       = $dir
+            Directory       = $f.DirectoryName
             File            = $f.Name
             AssemblyVersion = $asmVer
             FileVersion     = $fileVer
