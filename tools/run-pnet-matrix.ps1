@@ -106,14 +106,39 @@ foreach ($p in @($FixedDll, $BaselineDll, $PristineScenario)) {
     if (-not (Test-Path -LiteralPath $p)) { throw "missing input: $p" }
 }
 
-## The pristine tree must not already contain outputs: if it does, it has been
-## run in, and reason (1) means its inputs may already be the swapped variant.
-foreach ($leak in 'Landis-log.txt', 'output', 'outputs', 'Metadata') {
+## Has the pristine tree been run in? `Landis-log.txt` is written by every run
+## and is not committed, so its presence is definitive. An `output` directory is
+## NOT evidence: the repository commits one (it holds
+## output/forestRoadsSimulation/.gitkeep, so Forest Roads has somewhere to
+## write), and an earlier version of this check rejected a freshly extracted
+## tree for containing it.
+foreach ($leak in 'Landis-log.txt', 'Metadata') {
     if (Test-Path -LiteralPath (Join-Path $PristineScenario $leak)) {
         throw ("the pristine scenario contains '$leak', so it has been run in; " +
                "its harvest inputs may be the swapped variant. Re-extract it.")
     }
 }
+
+## Which harvest variant is active is informational, not a pass/fail: every run
+## is copied from this one tree, so they all start from whatever it says. It is
+## reported because it determines the harvest regime the whole matrix ran under.
+$harvestFile = Join-Path $PristineScenario `
+    'inputs\disturbances\magicHarvest\biomass-harvest_SetUp_s2e1.txt'
+$variant = 'unknown'
+if (Test-Path -LiteralPath $harvestFile) {
+    $impl = Get-Content -LiteralPath $harvestFile |
+            Where-Object { $_ -match '^\s*1\s+(MaxAgeClearcut|AbiesRemoval)\s' }
+    if ($impl -match 'MaxAgeClearcut') { $variant = 'MaxAgeClearcut 10% (as committed)' }
+    elseif ($impl -match 'AbiesRemoval') { $variant = 'AbiesRemoval 5% (the ALT variant)' }
+}
+Write-Host "harvest variant : $variant"
+
+## The guarantee that makes every run comparable is that this tree is never
+## written to. Assert it rather than trusting it: fingerprint now, re-check
+## after the runs.
+$pristineBefore = (Get-ChildItem -LiteralPath $PristineScenario -Recurse -File |
+                   Sort-Object FullName |
+                   ForEach-Object { '{0}:{1}' -f $_.Name, $_.Length }) -join '|'
 
 New-Item -ItemType Directory -Force -Path $WorkRoot | Out-Null
 
@@ -253,6 +278,18 @@ foreach ($c in $cells) {
 
 if (@($runs | Where-Object { -not $_.Ok }).Count -gt 0) {
     Write-Host "::error::one or more runs failed or did not honour its thread count; comparisons below are not trustworthy"
+}
+
+## If the pristine tree moved, every run after the first started from different
+## inputs and nothing below means anything.
+$pristineAfter = (Get-ChildItem -LiteralPath $PristineScenario -Recurse -File |
+                  Sort-Object FullName |
+                  ForEach-Object { '{0}:{1}' -f $_.Name, $_.Length }) -join '|'
+if ($pristineAfter -ne $pristineBefore) {
+    Write-Host ("::error::the pristine scenario changed during the matrix; runs did not all " +
+                "start from the same inputs and the comparisons below are void")
+} else {
+    Write-Host "pristine tree unchanged by the runs (as required)"
 }
 
 ## --------------------------------------------------------------------------
