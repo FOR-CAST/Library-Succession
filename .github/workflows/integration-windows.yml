@@ -231,6 +231,58 @@ jobs:
           }
           if ($bad) { exit 1 }
 
+      ## ----------------------------------------------------------------------
+      ## Downgrade PnET-Succession to v6.1.
+      ##
+      ## The install helper takes the NEWEST published installer for each repo,
+      ## which is PnET-Succession v6.1.1 (released 2026-09-12). That release
+      ## calls `PnETCohorts.SiteVars.UpdateUniversalCohorts()`, added to
+      ## Extension-PnET-Succession on 2026-09-11, and the method exists only on
+      ## Library-PnET-Cohort's master branch -- a repository with no releases at
+      ## all, so no published build carries it. The result is that a fresh
+      ## install of the current PnET-Succession cannot load:
+      ##
+      ##   Method not found: 'Void Landis.Library.PnETCohorts.SiteVars.UpdateUniversalCohorts()'
+      ##      at Landis.Extension.Succession.BiomassPnET.PlugIn.Initialize()
+      ##
+      ## Verified here with nothing swapped, so it is not caused by anything
+      ## this workflow builds. v6.1 (2026-07-14) predates that call and matches
+      ## the PnETCohorts that is actually in circulation, so it is the newest
+      ## combination a user can really obtain. Remove this step once upstream
+      ## releases a PnET-Cohorts carrying the method.
+      ## ----------------------------------------------------------------------
+      - name: Downgrade PnET-Succession to v6.1 (v6.1.1 cannot load)
+        run: |
+          $url = 'https://github.com/LANDIS-II-Foundation/Extension-PnET-Succession/releases/download/v6.1/LANDIS-II-V8.PnET-Succession.6.1-setup.exe'
+          $exe = Join-Path $env:RUNNER_TEMP 'pnet-6.1-setup.exe'
+          Invoke-WebRequest -Uri $url -OutFile $exe
+          '{0,10} bytes  {1}' -f (Get-Item -LiteralPath $exe).Length, (Split-Path -Leaf $exe) | Write-Host
+
+          $log = Join-Path $env:RUNNER_TEMP 'landis-installers\pnet-6.1-install.log'
+          New-Item -ItemType Directory -Force -Path (Split-Path -Parent $log) | Out-Null
+          $p = Start-Process -FilePath $exe -Wait -PassThru -ArgumentList @(
+            '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', "/LOG=$log"
+          )
+          if ($p.ExitCode -ne 0) {
+            Write-Host "::error::PnET-Succession v6.1 installer exited $($p.ExitCode)"
+            exit 1
+          }
+
+          $consoleDir  = Split-Path -Parent $env:LANDIS_CONSOLE_DLL
+          $installRoot = Split-Path -Parent $consoleDir
+          $pnet = Get-ChildItem -LiteralPath $installRoot -Recurse -File `
+                                -Filter 'Landis.Extension.Succession.BiomassPnET-v6.dll' |
+                  Select-Object -First 1
+          if (-not $pnet) {
+            Write-Host "::error::PnET assembly missing after the downgrade"
+            exit 1
+          }
+          'PnET-Succession now: FileVersion {0}' -f $pnet.VersionInfo.FileVersion | Write-Host
+          if ($pnet.VersionInfo.FileVersion -eq '6.1.1') {
+            Write-Host "::error::still 6.1.1; the downgrade did not take effect"
+            exit 1
+          }
+
       - name: Verify the console was found
         run: |
           if (-not $env:LANDIS_CONSOLE_DLL) {
