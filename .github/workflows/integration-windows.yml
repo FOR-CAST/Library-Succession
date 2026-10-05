@@ -461,6 +461,38 @@ jobs:
       ## which reads a Windows path as a remote host spec and dies with
       ## "Cannot connect to D: resolve failed". Expand-Archive has no such
       ## problem and needs no external tool.
+      ## The scenario and the extension list come from Tool-Docker-Apptainer, but
+      ## through two INDEPENDENT pins: this workflow's TDA_REF drives the
+      ## scenario fetch below, while the install helper sources its own TDA_REF
+      ## from landisutils' _pins.R. Point one at a different commit and the
+      ## scenario can reference extensions the install never provided.
+      ##
+      ## That is not hypothetical: pointing TDA_REF at a newer branch to test a
+      ## scenario change produced `No extension with the name "Climate BDA"` --
+      ## the newer scenario activates it, the pinned extension list has it
+      ## commented out -- and that read as a bug in the scenario rather than as
+      ## a mismatch I had introduced. Fail here instead, where the cause is
+      ## obvious.
+      - name: Check the scenario and extension-list refs agree
+        run: |
+          $pins = Get-Content -LiteralPath "$env:LANDIS_INSTALL_DIR\_pins.R" -Raw
+          $m = [regex]::Match($pins, 'TDA_REF\s*<-\s*"([0-9a-f]{7,40})"')
+          if (-not $m.Success) {
+            Write-Host "::error::could not read TDA_REF out of the install helper's _pins.R"
+            exit 1
+          }
+          $helperRef = $m.Groups[1].Value
+          Write-Host "extension list ref (helper _pins.R): $helperRef"
+          Write-Host "scenario ref       (this workflow): $env:TDA_REF"
+
+          if ($helperRef -ne $env:TDA_REF) {
+            Write-Host ("::error::the scenario is being taken from $env:TDA_REF but the extensions " +
+                        "were installed from $helperRef. The scenario may reference extensions that " +
+                        "are not installed. Point both at the same commit, or bump _pins.R in landisutils.")
+            exit 1
+          }
+          Write-Host "both refs agree, so the scenario and the installed extension set are consistent"
+
       - name: Fetch the PnET scenario
         run: |
           $zip = Join-Path $env:RUNNER_TEMP 'tda.zip'
