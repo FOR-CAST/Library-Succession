@@ -75,12 +75,16 @@ env:
   ## set cannot drift apart. This is the ref landisutils pins, where the UCLv2
   ## list includes PnET-Succession.
   ## TEMPORARY: pointed at FOR-CAST/Tool-Docker-Apptainer branch
-  ## fix/testpnet-no-input-rewrite (64d0bed) to verify end-to-end that the
+  ## test/magicharvest-fix-at-pinned to verify end-to-end that the
   ## scenario still runs once Magic Harvest copies its prescription into a
-  ## git-ignored working file instead of renaming tracked ones. Revert both
+  ## git-ignored working file instead of renaming tracked ones. That branch is
+  ## 043b43e6 plus ONLY that fix, so nothing else differs from the known-good
+  ## run. (A first attempt used a main-based branch, which also activated
+  ## "Climate BDA" -- a name the published installers do not register -- and
+  ## failed for that unrelated reason.) Revert both
   ## lines to LANDIS-II-Foundation / 043b43e6 afterwards.
   TDA_REPO: FOR-CAST/Tool-Docker-Apptainer
-  TDA_REF: 64d0bed2755e24199fa2ac5359d2c0cb85a66e20
+  TDA_REF: 42dd6bb5bafeb30f9ae2e4fa8bbab4b6233ec684
 
   ## The candidate half of the matrix is built from this ref, fetched from
   ## upstream, so its provenance is the pull request itself.
