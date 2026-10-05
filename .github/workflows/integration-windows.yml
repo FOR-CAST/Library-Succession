@@ -74,17 +74,8 @@ env:
   ## Tool-Docker-Apptainer commit, so the inputs and the installed extension
   ## set cannot drift apart. This is the ref landisutils pins, where the UCLv2
   ## list includes PnET-Succession.
-  ## TEMPORARY: pointed at FOR-CAST/Tool-Docker-Apptainer branch
-  ## test/magicharvest-fix-at-pinned to verify end-to-end that the
-  ## scenario still runs once Magic Harvest copies its prescription into a
-  ## git-ignored working file instead of renaming tracked ones. That branch is
-  ## 043b43e6 plus ONLY that fix, so nothing else differs from the known-good
-  ## run. (A first attempt used a main-based branch, which also activated
-  ## "Climate BDA" -- a name the published installers do not register -- and
-  ## failed for that unrelated reason.) Revert both
-  ## lines to LANDIS-II-Foundation / 043b43e6 afterwards.
-  TDA_REPO: FOR-CAST/Tool-Docker-Apptainer
-  TDA_REF: 42dd6bb5bafeb30f9ae2e4fa8bbab4b6233ec684
+  TDA_REPO: LANDIS-II-Foundation/Tool-Docker-Apptainer
+  TDA_REF: 043b43e6291813d5092721d45ff630502e777e30
 
   ## The candidate half of the matrix is built from this ref, fetched from
   ## upstream, so its provenance is the pull request itself.
